@@ -3,7 +3,7 @@ import * as ort from 'onnxruntime-web';
 
 /**
  * Configuration for different ONNX models
- * Most style transfer models expect 224x224 or 256x256 input
+ * Different style transfer models may have different input requirements
  */
 export const PREPROCESSING_CONFIGS = {
   default: {
@@ -16,8 +16,22 @@ export const PREPROCESSING_CONFIGS = {
   styleTransfer: {
     width: 224,
     height: 224,
-    mean: [0.485, 0.456, 0.406],
+    mean: [0.485, 0.456, 0.406], // ImageNet normalization
     std: [0.229, 0.224, 0.225],
+    channels: 3,
+  },
+  styleTransferSimple: {
+    width: 224,
+    height: 224,
+    mean: [0.5, 0.5, 0.5], // Simple normalization (-1 to 1 range)
+    std: [0.5, 0.5, 0.5],
+    channels: 3,
+  },
+  styleTransferNoNorm: {
+    width: 224,
+    height: 224,
+    mean: [0.0, 0.0, 0.0], // No normalization (0 to 1 range)
+    std: [1.0, 1.0, 1.0],
     channels: 3,
   }
 };
@@ -126,11 +140,13 @@ export function createONNXTensor(
  */
 export async function preprocessImageForONNX(
   file: File,
-  modelType: 'default' | 'styleTransfer' = 'styleTransfer'
+  modelType: 'default' | 'styleTransfer' | 'styleTransferSimple' | 'styleTransferNoNorm' = 'styleTransferSimple'
 ): Promise<ort.Tensor> {
   console.log('Starting image preprocessing...');
+  console.log('Using config:', modelType);
   
   const config = PREPROCESSING_CONFIGS[modelType];
+  console.log('Config details:', config);
   
   try {
     // Step 1: Load image from file
@@ -153,6 +169,15 @@ export async function preprocessImageForONNX(
     console.log('Image preprocessing completed successfully');
     console.log('Tensor shape:', tensor.dims);
     
+    // Calculate min/max without spread operator to avoid stack overflow
+    let min = normalizedData[0];
+    let max = normalizedData[0];
+    for (let i = 1; i < normalizedData.length; i++) {
+      if (normalizedData[i] < min) min = normalizedData[i];
+      if (normalizedData[i] > max) max = normalizedData[i];
+    }
+    console.log('Tensor data range:', { min, max });
+    
     // Clean up
     URL.revokeObjectURL(img.src);
 
@@ -165,8 +190,87 @@ export async function preprocessImageForONNX(
 
 /**
  * Convert ONNX tensor output back to ImageData for display
+ * Improved version with better handling of different output formats
  */
 export function tensorToImageData(
+  tensor: ort.Tensor,
+  width: number,
+  height: number,
+  configType: 'default' | 'styleTransfer' | 'styleTransferSimple' | 'styleTransferNoNorm' = 'styleTransferSimple'
+): ImageData {
+  const data = tensor.data as Float32Array;
+  const imageData = new ImageData(width, height);
+  
+  console.log('Converting tensor to image data...');
+  console.log('Output tensor shape:', tensor.dims);
+  console.log('Output data range:', {
+    min: Math.min(...Array.from(data)),
+    max: Math.max(...Array.from(data))
+  });
+  
+  const config = PREPROCESSING_CONFIGS[configType];
+  const { mean, std } = config;
+  
+  for (let i = 0; i < width * height; i++) {
+    let r, g, b;
+    
+    // Handle different tensor layouts
+    if (tensor.dims.length === 4) {
+      // Standard CHW format [1, 3, H, W]
+      r = data[i];
+      g = data[width * height + i];
+      b = data[2 * width * height + i];
+    } else if (tensor.dims.length === 3) {
+      // CHW format [3, H, W]
+      r = data[i];
+      g = data[width * height + i];
+      b = data[2 * width * height + i];
+    } else {
+      throw new Error(`Unsupported tensor shape: ${tensor.dims}`);
+    }
+    
+    // Denormalize based on the configuration used
+    if (configType === 'styleTransferNoNorm') {
+      // No normalization was applied, data should be in 0-1 range
+      r = Math.max(0, Math.min(1, r));
+      g = Math.max(0, Math.min(1, g));
+      b = Math.max(0, Math.min(1, b));
+    } else if (configType === 'styleTransferSimple') {
+      // Simple normalization: from [-1, 1] back to [0, 1]
+      r = (r * std[0] + mean[0]);
+      g = (g * std[1] + mean[1]);
+      b = (b * std[2] + mean[2]);
+      // Clamp to [0, 1]
+      r = Math.max(0, Math.min(1, r));
+      g = Math.max(0, Math.min(1, g));
+      b = Math.max(0, Math.min(1, b));
+    } else {
+      // ImageNet normalization: denormalize and clamp
+      r = (r * std[0] + mean[0]);
+      g = (g * std[1] + mean[1]);
+      b = (b * std[2] + mean[2]);
+      // Clamp to [0, 1]
+      r = Math.max(0, Math.min(1, r));
+      g = Math.max(0, Math.min(1, g));
+      b = Math.max(0, Math.min(1, b));
+    }
+    
+    // Convert to 0-255 range
+    const pixelIndex = i * 4;
+    imageData.data[pixelIndex] = Math.round(r * 255);     // Red
+    imageData.data[pixelIndex + 1] = Math.round(g * 255); // Green
+    imageData.data[pixelIndex + 2] = Math.round(b * 255); // Blue
+    imageData.data[pixelIndex + 3] = 255;                 // Alpha
+  }
+  
+  console.log('Tensor to image conversion completed');
+  return imageData;
+}
+
+/**
+ * Alternative post-processing function for testing different approaches
+ */
+export function tensorToImageDataAuto(
   tensor: ort.Tensor,
   width: number,
   height: number
@@ -174,22 +278,68 @@ export function tensorToImageData(
   const data = tensor.data as Float32Array;
   const imageData = new ImageData(width, height);
   
-  // Convert from CHW format back to HWC and denormalize
-  const { mean, std } = PREPROCESSING_CONFIGS.styleTransfer;
+  console.log('Auto-converting tensor to image data...');
+  console.log('Output tensor shape:', tensor.dims);
   
-  for (let i = 0; i < width * height; i++) {
-    // Get normalized values from CHW format
-    const r = data[i] * std[0] + mean[0];
-    const g = data[width * height + i] * std[1] + mean[1];
-    const b = data[2 * width * height + i] * std[2] + mean[2];
-    
-    // Convert to 0-255 range and clamp
-    const pixelIndex = i * 4;
-    imageData.data[pixelIndex] = Math.max(0, Math.min(255, r * 255));     // Red
-    imageData.data[pixelIndex + 1] = Math.max(0, Math.min(255, g * 255)); // Green
-    imageData.data[pixelIndex + 2] = Math.max(0, Math.min(255, b * 255)); // Blue
-    imageData.data[pixelIndex + 3] = 255;                                  // Alpha
+  // Calculate min and max without using spread operator to avoid stack overflow
+  let min = data[0];
+  let max = data[0];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i] < min) min = data[i];
+    if (data[i] > max) max = data[i];
+  }
+  const dataRange = { min, max };
+  console.log('Output data range:', dataRange);
+  
+  // Auto-detect the normalization based on data range
+  let denormalizeFunc: (val: number) => number;
+  
+  if (dataRange.min >= -1.1 && dataRange.max <= 1.1) {
+    // Data appears to be in [-1, 1] range (simple normalization)
+    console.log('Detected [-1, 1] range, using simple denormalization');
+    denormalizeFunc = (val: number) => (val + 1) / 2; // Convert [-1, 1] to [0, 1]
+  } else if (dataRange.min >= -0.1 && dataRange.max <= 1.1) {
+    // Data appears to be in [0, 1] range
+    console.log('Detected [0, 1] range, no denormalization needed');
+    denormalizeFunc = (val: number) => val;
+  } else {
+    // Unknown range, normalize to [0, 1]
+    console.log('Unknown range, normalizing to [0, 1]');
+    const range = dataRange.max - dataRange.min;
+    denormalizeFunc = (val: number) => (val - dataRange.min) / range;
   }
   
+  for (let i = 0; i < width * height; i++) {
+    let r, g, b;
+    
+    // Handle different tensor layouts
+    if (tensor.dims.length === 4) {
+      // Standard CHW format [1, 3, H, W]
+      r = data[i];
+      g = data[width * height + i];
+      b = data[2 * width * height + i];
+    } else if (tensor.dims.length === 3) {
+      // CHW format [3, H, W]
+      r = data[i];
+      g = data[width * height + i];
+      b = data[2 * width * height + i];
+    } else {
+      throw new Error(`Unsupported tensor shape: ${tensor.dims}`);
+    }
+    
+    // Apply denormalization
+    r = denormalizeFunc(r);
+    g = denormalizeFunc(g);
+    b = denormalizeFunc(b);
+    
+    // Clamp and convert to 0-255 range
+    const pixelIndex = i * 4;
+    imageData.data[pixelIndex] = Math.round(Math.max(0, Math.min(1, r)) * 255);     // Red
+    imageData.data[pixelIndex + 1] = Math.round(Math.max(0, Math.min(1, g)) * 255); // Green
+    imageData.data[pixelIndex + 2] = Math.round(Math.max(0, Math.min(1, b)) * 255); // Blue
+    imageData.data[pixelIndex + 3] = 255;                                           // Alpha
+  }
+  
+  console.log('Auto tensor to image conversion completed');
   return imageData;
 }

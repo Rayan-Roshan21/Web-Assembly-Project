@@ -1,6 +1,6 @@
 // src/utils/onnxModelHandler.ts
 import * as ort from 'onnxruntime-web';
-import { preprocessImageForONNX, tensorToImageData, PREPROCESSING_CONFIGS } from './imagePreprocessing';
+import { preprocessImageForONNX, tensorToImageDataAuto, PREPROCESSING_CONFIGS } from './imagePreprocessing';
 
 // Configure ONNX Runtime for web
 let isOnnxInitialized = false;
@@ -98,15 +98,15 @@ export class ONNXModelHandler {
     try {
       console.log(`Processing image with ${this.modelName} model...`);
       
-      // Step 1: Preprocess image
-      const inputTensor = await preprocessImageForONNX(file, 'styleTransfer');
+      // Step 1: Preprocess image with improved configuration
+      const inputTensor = await preprocessImageForONNX(file, 'styleTransferSimple');
       
       // Step 2: Run inference
       const outputTensor = await this.runInference(inputTensor);
       
-      // Step 3: Convert output tensor to ImageData
-      const config = PREPROCESSING_CONFIGS.styleTransfer;
-      const imageData = tensorToImageData(outputTensor, config.width, config.height);
+      // Step 3: Convert output tensor to ImageData with auto-detection
+      const config = PREPROCESSING_CONFIGS.styleTransferSimple;
+      const imageData = tensorToImageDataAuto(outputTensor, config.width, config.height);
       
       console.log(`✅ Image processing completed with ${this.modelName}`);
       return imageData;
